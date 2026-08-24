@@ -9,11 +9,48 @@ Cách dùng:
 
     llm_gemini = get_llm("gemini")    # chỉ định provider cụ thể
 """
+import hashlib
+import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import config
+
+from langchain_core.embeddings import Embeddings
+
+
+class LocalHashEmbeddings(Embeddings):
+    """Small deterministic embeddings fallback for providers without embedding APIs."""
+
+    def __init__(self, dimensions: int = 384):
+        self.dimensions = dimensions
+
+    @staticmethod
+    def _tokens(text: str) -> list[str]:
+        return re.findall(r"[a-zA-Z0-9_]+", text.lower())
+
+    def _embed(self, text: str) -> list[float]:
+        vector = [0.0] * self.dimensions
+        for token in self._tokens(text):
+            digest = hashlib.md5(token.encode("utf-8")).digest()
+            index = int.from_bytes(digest[:4], "big") % self.dimensions
+            sign = 1.0 if digest[4] % 2 == 0 else -1.0
+            vector[index] += sign
+
+        norm = sum(v * v for v in vector) ** 0.5
+        if norm:
+            vector = [v / norm for v in vector]
+        return vector
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [self._embed(text) for text in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed(text)
+
+    def __call__(self, text: str) -> list[float]:
+        return self.embed_query(text)
 
 
 def get_llm(provider: str = None, temperature: float = 0.0):
@@ -105,7 +142,7 @@ def get_embeddings(provider: str = None):
     """
     provider = (provider or config.PROVIDER).lower()
 
-    if provider in ("openai", "openrouter"):
+    if provider == "openai":
         from langchain_openai import OpenAIEmbeddings
         kwargs = {
             "model": config.OPENAI_EMBEDDING_MODEL,
@@ -114,6 +151,10 @@ def get_embeddings(provider: str = None):
         if config.OPENAI_BASE_URL:
             kwargs["base_url"] = config.OPENAI_BASE_URL
         return OpenAIEmbeddings(**kwargs)
+
+    elif provider == "openrouter":
+        print("ℹ️  OpenRouter không có embeddings riêng — dùng LocalHashEmbeddings.")
+        return LocalHashEmbeddings()
 
     elif provider == "gemini":
         from langchain_google_genai import GoogleGenerativeAIEmbeddings
